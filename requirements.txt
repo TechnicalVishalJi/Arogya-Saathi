@@ -1,0 +1,6 @@
+Flask
+requests
+google-cloud-dialogflow
+google-cloud-translate
+python-dotenv
+gunicorn

@@ -1,0 +1,25 @@
+from google.cloud import translate
+from google.cloud import translate_v2 as translate_v2
+from google.cloud import translate as translate_v3
+import os
+
+# We'll use translate_v2 client for simplicity
+from google.cloud import translate_v2 as translate_client
+
+client = translate_client.Client()
+
+def detect_language(text):
+    try:
+        res = client.detect_language(text)
+        lang = res.get("language")
+        return lang
+    except Exception as e:
+        # fallback to english
+        return "en"
+
+def translate_text(text, target="en"):
+    if text is None:
+        return ""
+    # if target is already 'en' and text language is en, this will still return the same text
+    result = client.translate(text, target_language=target)
+    return result.get("translatedText")
