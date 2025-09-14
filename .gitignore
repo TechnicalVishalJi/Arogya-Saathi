@@ -1,4 +1,9 @@
 venv/
 service-account.json
+service-account-trans.json
 __pycache__/
 .env
+database/data/
+database/snapshots/
+database/storage/
+database/.qdrant-initialized
