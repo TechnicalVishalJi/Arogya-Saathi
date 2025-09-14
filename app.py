@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import tempfile
 from flask import Flask, request, jsonify
 import requests
 from dotenv import load_dotenv
@@ -11,15 +12,17 @@ from datetime import datetime
 from qdrant_client import QdrantClient
 from sentence_transformers import SentenceTransformer
 import ast
-# from translate_utils import detect_language, translate_text
+from google.cloud import speech_v1p1beta1 as speech, texttospeech
+import uuid
+from translate_utils import detect_language, translate_text
 
-def detect_language(text):
-    # Dummy implementation, replace with actual translation utility
-    return "en"  # Assume English for simplicity
+# def detect_language(text):
+#     # Dummy implementation, replace with actual translation utility
+#     return "en"  # Assume English for simplicity
 
-def translate_text(text, target="en"):
-    # Dummy implementation, replace with actual translation utility
-    return text  # No translation for simplicity
+# def translate_text(text, target="en"):
+#     # Dummy implementation, replace with actual translation utility
+#     return text  # No translation for simplicity
 
 # ================== CONFIG ==================
 load_dotenv()
@@ -27,12 +30,16 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 detected_lang = "en"  # default language
 channel = "WhatsApp"  # default channel
+chatFormat = "text"  # text or audio
 
 META_ACCESS_TOKEN = os.getenv("META_ACCESS_TOKEN")
 META_PHONE_NUMBER_ID = os.getenv("META_PHONE_NUMBER_ID")
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
 DIALOGFLOW_PROJECT_ID = os.getenv("DIALOGFLOW_PROJECT_ID")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+translate_credentials = service_account.Credentials.from_service_account_file(
+    os.getenv("GOOGLE_APPLICATION_CREDENTIALS_TRANSLATE")
+)
 
 QDRANT_URL = "http://localhost:6333"
 COLLECTION_NAME = "health_kb"
@@ -85,24 +92,44 @@ def webhook():
                     phone = msg.get("from")
                     msg_id = msg.get("id")
                     msg_type = msg.get("type")
+
+                    global chatFormat
+
                     text = None
                     if msg_type == "text":
+                        chatFormat = "text"
                         text = msg["text"].get("body")
+
                     elif msg_type == "image":
+                        chatFormat = "text"
                         text = msg.get("caption") or "Image received"
+
+                    elif msg_type == "audio":
+                        chatFormat = "audio"
+                        media_id = msg["audio"]["id"]
+                        audio_bytes = download_whatsapp_media(media_id)
+                        text = transcribe_audio(audio_bytes)
+
                     else:
                         text = f"Unsupported message type: {msg_type}"
 
-                    # forward to dialogflow
+                    # Forward to Dialogflow or Gemini
                     global channel
                     channel = "WhatsApp"
                     response = handle_incoming_message(phone, text)
-                    send_whatsapp_text(phone, response)
+                    if(response == "Reminders"):
+                        send_whatsapp_text(phone, translate_text("Setting Reminder for you...", target=detected_lang), "text")
+                    elif(response == "Thinking"):
+                        send_whatsapp_text(phone, translate_text("Thinking...", target=detected_lang), "text")
+                    else:
+                        send_whatsapp_text(phone, response)
+
     except Exception as e:
         app.logger.exception("Webhook error: %s", e)
         return "Error", 500
 
     return "EVENT_RECEIVED", 200
+
 
 # @app.route("/webhookSms", methods=["POST"])
 # def webhook_sms():
@@ -176,8 +203,12 @@ def handle_incoming_message(phone, text):
         if not result.intent.is_fallback and result.fulfillment_text:
             return result.fulfillment_text
         elif intent == "Reminders":
+            if chatFormat == "audio":
+                return "Reminders"
             return translate_text("Setting Reminder for you...", target=detected_lang)
         else:
+            if chatFormat == "audio":
+                return "Thinking"
             return translate_text("Thinking...", target=detected_lang)
     except Exception as e:
         app.logger.exception("handle_incoming_message error: %s", e)
@@ -228,7 +259,7 @@ def generate_prompt(question, top_k=4):
         score = h.score
         contexts.append({"text": txt, "source": src, "score": score})
     # Build prompt for Gemini
-    prompt = "You are a professional health assistant named as 'Arogya Saathi'. Use only the following documents to answer the user's question. If the answer is not in the documents, then search through official and reliable sources and reply for the answer by yourself.\n\n"
+    prompt = "You are a professional health assistant. Use only the following documents to answer the user's question. If the answer is not in the documents, then search through official and reliable sources and reply for the answer by yourself.\n\n"
     for i, c in enumerate(contexts):
         prompt += f"Document {i+1} (source={c['source']}, score={c['score']}):\n{c['text']}\n\n"
     prompt += f"Question: {question}\nAnswer concisely and clearly."
@@ -272,17 +303,101 @@ def handle_reminder(phone: str, text: str) -> str:
         target=detected_lang
     )
 
-def send_whatsapp_text(to_phone, message_text):
-    headers = {"Content-Type": "application/json"}
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": to_phone,
-        "type": "text",
-        "text": {"body": message_text}
-    }
-    params = {"access_token": META_ACCESS_TOKEN}
-    resp = requests.post(META_API_URL, params=params, headers=headers, json=payload)
-    return resp
+def download_whatsapp_media(media_id: str) -> bytes:
+    """Download media from WhatsApp using media_id."""
+    # Step 1: Get media URL
+    url = f"https://graph.facebook.com/v20.0/{media_id}"
+    headers = {"Authorization": f"Bearer {META_ACCESS_TOKEN}"}
+    resp = requests.get(url, headers=headers)
+    resp.raise_for_status()
+    media_url = resp.json().get("url")
+
+    # Step 2: Download actual file
+    resp = requests.get(media_url, headers=headers)
+    resp.raise_for_status()
+    return resp.content
+
+def transcribe_audio(audio_bytes: bytes) -> str:
+    """Convert audio bytes to text using Google Speech-to-Text."""
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        tmp.write(audio_bytes)   # audio_bytes = from WhatsApp
+        tmp_path = tmp.name
+    # Load audio file (must be wav/mp3/m4a/webm)
+    audio_file = genai.upload_file(tmp_path)
+
+    prompt = """
+    You are a transcription helper. I have provided you an audio file.
+    1. Detect speaker language from these codes ['en', 'hi', 'bn'].
+    2. Respond with only the code of the detected language.
+    """
+
+    code = gemini_model.generate_content([prompt, audio_file]).text.strip()
+    print("Detected language code from audio:", code)
+
+    client = speech.SpeechClient(credentials=translate_credentials)
+
+    audio = speech.RecognitionAudio(content=audio_bytes)
+    config = speech.RecognitionConfig(
+        encoding=speech.RecognitionConfig.AudioEncoding.OGG_OPUS,  # WhatsApp voice notes are usually OGG/Opus
+        sample_rate_hertz=16000,
+        language_code=code+"-IN",  # 👈 change based on user’s language
+        alternative_language_codes=["hi-IN", "en-IN", "bn-IN", "ta-IN"]  # add languages you expect
+    )
+
+    response = client.recognize(config=config, audio=audio)
+    transcript = " ".join([r.alternatives[0].transcript for r in response.results])
+    print("Transcription result:", transcript)
+    return transcript or "Could not transcribe audio."
+
+def synthesize_speech(text):
+    client = texttospeech.TextToSpeechClient(credentials=translate_credentials)
+    synthesis_input = texttospeech.SynthesisInput(text=text)
+
+    voice = texttospeech.VoiceSelectionParams(
+        language_code=detected_lang+"-IN",  # change based on detected language
+        ssml_gender=texttospeech.SsmlVoiceGender.NEUTRAL
+    )
+
+    audio_config = texttospeech.AudioConfig(
+        audio_encoding=texttospeech.AudioEncoding.MP3
+    )
+
+    response = client.synthesize_speech(
+        input=synthesis_input, voice=voice, audio_config=audio_config
+    )
+    filename = f"static/{uuid.uuid4().hex}.mp3"
+    with open(filename, "wb") as f:
+        f.write(response.audio_content)
+
+    # return a public URL (assuming you serve /static via Flask)
+    return f"{os.getenv('SERVER_DOMAIN')}/{filename}"
+
+
+def send_whatsapp_text(to_phone, message_text, format=None):
+    finalFormat = chatFormat if format is None else format
+    if finalFormat == "audio":
+        audio_url = synthesize_speech(message_text)
+        headers = {"Content-Type": "application/json"}
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": to_phone,
+            "type": "audio",
+            "audio": {"link": audio_url}
+        }
+        params = {"access_token": META_ACCESS_TOKEN}
+        requests.post(META_API_URL, params=params, headers=headers, json=payload)
+    else:
+        headers = {"Content-Type": "application/json"}
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": to_phone,
+            "type": "text",
+            "text": {"body": message_text}
+        }
+        params = {"access_token": META_ACCESS_TOKEN}
+        resp = requests.post(META_API_URL, params=params, headers=headers, json=payload)
+        return resp
+        
 
 def send_sms(to_phone, message_text):
     try:

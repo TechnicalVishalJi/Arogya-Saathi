@@ -12,3 +12,5 @@ python-docx
 pymupdf
 requests
 tqdm
+google-cloud-speech
+google-cloud-texttospeech
