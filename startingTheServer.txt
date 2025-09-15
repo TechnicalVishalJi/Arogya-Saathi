@@ -1,5 +1,4 @@
-correct the translate system
 python app.py
 ngrok http 5000
 start qdrant exe
-add webhook in dialogflow and whatsapp Bussiness API to point to ngrok link
+add webhook in dialogflow, whatsapp Bussiness API and Env variables to point to ngrok link
