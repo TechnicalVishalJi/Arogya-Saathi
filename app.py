@@ -242,7 +242,7 @@ def continue_webhook():
         return jsonify({"fulfillmentText": reply_text})
     else:  # Default Fallback Intent
         reply_text = answer_with_gemini(generate_prompt(user_text))
-        print("Gemini reply:", reply_text)
+        print("AI reply:", reply_text)
 
     send_whatsapp_text(phone, reply_text) if channel=="WhatsApp" else send_sms(phone, reply_text)
 
@@ -284,7 +284,8 @@ def answer_with_gemini(prompt: str) -> str:
         return translate_text("I had trouble answering that. Please try again.", target=detected_lang)
 
 def handle_reminder(phone: str, text: str) -> str:
-    task, date, time = ast.literal_eval(gemini_model.generate_content(f"Below is the task that user wants to set reminder for and provide me reponse as a tuple in the format as ('<task>', '<date>', '<time>'). The date and time should follow ISO 8601 standard: \n\n {text}").text.strip())
+    now = datetime.now().isoformat()
+    task, date, time = ast.literal_eval(gemini_model.generate_content(f"Today's date and time is: {now} (ISO 8601 format). Below is the task that user wants to set reminder for and provide me reponse as a tuple in the format as ('<task>', '<date>', '<time>'). The date and time should follow ISO 8601 standard: \n\n {text}").text.strip())
     print("Parsed reminder:", task, date, time)
     try:
         reminder_dt = datetime.fromisoformat(f"{date}T{time+'+05:30'}")
